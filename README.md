@@ -1,0 +1,34 @@
+# AURA Bot
+
+بوت Telegram عربي بسيط بهيكل أقسام تفاعلية، مع إعداد آمن للرمز عبر متغير بيئة.
+
+## المتطلبات
+
+- Python 3.10+
+- Telegram Bot Token جديد من BotFather
+
+## التشغيل محلياً
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
+pip install -r requirements.txt
+export TELEGRAM_BOT_TOKEN="ضع_الرمز_محلياً"  # PowerShell: $env:TELEGRAM_BOT_TOKEN="..."
+python main.py
+```
+
+لا تضع الرمز في `main.py` أو GitHub. انسخ `.env.example` كمرجع فقط؛ لا ترفع ملف `.env`.
+
+## الوظائف الحالية
+
+- `/start` يعرض لوحة الأقسام.
+- أزرار الأقسام تعرض وصفاً تعريفياً.
+- الدفع معطّل عمداً إلى أن تُربط بوابة دفع حقيقية وتُختبر؛ لا توجد روابط دفع وهمية.
+
+## النشر
+
+يمكن تشغيل البوت على خادم Python يدعم عملية طويلة الأمد. أضف `TELEGRAM_BOT_TOKEN` في مخزن أسرار مزود الاستضافة، ثم شغّل `python main.py`. هذا المستودع لا يحتوي حالياً على استضافة عامة أو رابط تجربة ويب؛ البوت يُجرّب عبر Telegram بعد تشغيله وربطه برمز صالح.
+
+## الأمان
+
+إذا سبق نشر رمز البوت داخل Git، ألغِه فوراً من BotFather باستخدام `/revoke` وأنشئ رمزاً جديداً. حذف الرمز من الملف الحالي لا يزيله من تاريخ Git السابق.

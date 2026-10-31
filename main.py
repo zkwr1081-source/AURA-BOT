@@ -107,11 +107,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("هذا المنتج لم يعد متاحاً.")
             return
         currency = context.application.bot_data["currency"]
-        text = f"*{product['name']}*\n{product['description']}\nالسعر: {product['price']} {currency}"
+        text = f"{product['name']}\n{product['description']}\nالسعر: {product['price']} {currency}"
         keyboard = [[InlineKeyboardButton("🛒 اطلب الآن", callback_data=f"order:{product_id}")]]
         await query.message.reply_text(
             text,
-            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return

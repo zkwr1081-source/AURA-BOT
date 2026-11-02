@@ -63,6 +63,17 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(order["contact"], "+100000000")
         self.assertEqual(order["status"], "contacted")
 
+    def test_pending_order_cancellation_is_owner_only_and_one_time(self):
+        product_id = self.store.add_product("منتج", "5")
+        order_id = self.store.create_order(product_id, 123, "عميل")
+
+        self.assertFalse(self.store.cancel_order(order_id, 456))
+        self.assertTrue(self.store.cancel_order(order_id, 123))
+        self.assertFalse(self.store.cancel_order(order_id, 123))
+
+        order = self.store.list_orders()[0]
+        self.assertEqual(order["status"], "cancelled")
+
     def test_status_validation(self):
         product_id = self.store.add_product("منتج", "5")
         order_id = self.store.create_order(product_id, 123, "عميل")

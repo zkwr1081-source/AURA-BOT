@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import sqlite3
@@ -175,12 +176,11 @@ def save_lead(user, message: str) -> int:
 async def retention_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
     """JobQueue callback for daily privacy-retention cleanup."""
     try:
-        deleted = await context.application.run_in_thread(purge_expired_leads)
+        deleted = await asyncio.to_thread(purge_expired_leads)
         if deleted:
             logger.info("Purged %s expired lead records", deleted)
     except Exception:
         logger.exception("Lead retention cleanup failed")
-
 
 async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Let a Telegram user remove their inquiry records from the local database."""
@@ -205,14 +205,6 @@ async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-async def retention_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
-    """JobQueue callback for daily privacy-retention cleanup."""
-    try:
-        deleted = await context.application.run_in_thread(purge_expired_leads)
-        if deleted:
-            logger.info("Purged %s expired lead records", deleted)
-    except Exception:
-        logger.exception("Lead retention cleanup failed")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -260,10 +252,10 @@ async def request_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if os.getenv("ADMIN_CHAT_ID", "").strip():
         consent_text += (
-            "\\nإشعار الإدارة مفعّل: ستُرسل نسخة من تفاصيل الطلب إلى محادثة الإدارة. "
+            "\nإشعار الإدارة مفعّل: ستُرسل نسخة من تفاصيل الطلب إلى محادثة الإدارة. "
             "الأمر /forget لا يحذف نسخة الرسالة من سجل Telegram لدى الإدارة."
         )
-    consent_text += "\\nيمكنك الإلغاء الآن."
+    consent_text += "\nيمكنك الإلغاء الآن."
     await update.effective_message.reply_text(
         consent_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -363,7 +355,7 @@ def main():
             "never put bot tokens in source code."
         )
 
-    retention_days = leads_retention_days()
+    leads_retention_days()
     purged = purge_expired_leads()
     if purged:
         logger.info("Purged %s expired lead records at startup", purged)

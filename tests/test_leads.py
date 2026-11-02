@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sqlite3
 import tempfile
@@ -6,6 +7,8 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import main as aura_main
 
 from main import (
     delete_leads_for_user,
@@ -158,6 +161,72 @@ class SaveLeadTests(unittest.TestCase):
         with patch.dict(os.environ, {"LEADS_RETENTION_DAYS": "90"}):
             self.assertEqual(leads_retention_days(), 90)
 
+
+    def test_daily_retention_job_is_registered_at_startup(self):
+        class FakeJobQueue:
+            def __init__(self):
+                self.calls = []
+
+            def run_repeating(self, callback, interval, first, name):
+                self.calls.append((callback, interval, first, name))
+
+        class FakeApplication:
+            def __init__(self, job_queue):
+                self.job_queue = job_queue
+                self.handlers = []
+                self.error_handlers = []
+                self.polling_started = False
+
+            def add_handler(self, handler):
+                self.handlers.append(handler)
+
+            def add_error_handler(self, handler):
+                self.error_handlers.append(handler)
+
+            def run_polling(self):
+                self.polling_started = True
+
+        class FakeBuilder:
+            def __init__(self, application):
+                self.application = application
+                self.configured_token = None
+
+            def token(self, token):
+                self.configured_token = token
+                return self
+
+            def build(self):
+                return self.application
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "missing.sqlite3")
+            job_queue = FakeJobQueue()
+            application = FakeApplication(job_queue)
+            builder = FakeBuilder(application)
+            with patch.dict(
+                os.environ,
+                {
+                    "TELEGRAM_BOT_TOKEN": "test-token-not-used-for-network",
+                    "LEADS_DB_PATH": database,
+                    "LEADS_RETENTION_DAYS": "90",
+                },
+            ):
+                with patch("main.ApplicationBuilder", return_value=builder):
+                    aura_main.main()
+
+            self.assertEqual(builder.configured_token, "test-token-not-used-for-network")
+            self.assertTrue(application.polling_started)
+            self.assertEqual(
+                job_queue.calls,
+                [(aura_main.retention_cleanup_job, 24 * 60 * 60, 60, "aura-lead-retention")],
+            )
+            self.assertFalse(os.path.exists(database))
+
+    def test_retention_job_runs_cleanup_in_a_worker_thread(self):
+        context = SimpleNamespace(application=SimpleNamespace())
+        with patch("main.purge_expired_leads", return_value=2) as purge_mock:
+            asyncio.run(aura_main.retention_cleanup_job(context))
+        purge_mock.assert_called_once()
 
 if __name__ == "__main__":
     unittest.main()

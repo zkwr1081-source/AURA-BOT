@@ -1,3 +1,5 @@
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +13,25 @@ class StoreTests(unittest.TestCase):
         self.store = Store(str(Path(self.temp_dir.name) / "test.db"))
 
     def tearDown(self):
+        self.store.close()
         self.temp_dir.cleanup()
+
+    def test_database_file_permissions_are_owner_only_on_posix(self):
+        if os.name != "posix":
+            self.skipTest("POSIX file permission assertion")
+        mode = stat.S_IMODE(os.stat(self.store.database_path).st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_memory_database_is_shared_between_store_connections(self):
+        store = Store(":memory:")
+        try:
+            product_id = store.add_product("منتج ذاكرة", "3.25")
+            product = store.get_product(product_id)
+            self.assertIsNotNone(product)
+            self.assertEqual(product["name"], "منتج ذاكرة")
+            self.assertEqual(store.list_products()[0]["price"], "3.25")
+        finally:
+            store.close()
 
     def test_add_and_list_product(self):
         product_id = self.store.add_product("قهوة عربية", "12.50", "عبوة 250 غرام")
@@ -21,7 +41,7 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(products[0]["price"], "12.50")
 
     def test_reject_invalid_prices(self):
-        for value in ("0", "-2", "abc", "NaN", "Infinity"):
+        for value in ("0", "-2", "abc", "NaN", "Infinity", "1e100000", "1000000000000.00"):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     self.store.add_product("منتج", value)

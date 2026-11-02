@@ -28,6 +28,28 @@ LEAD_DETAILS = 1
 
 DEFAULT_LEADS_RETENTION_DAYS = 90
 MAX_LEADS_RETENTION_DAYS = 3650
+DEFAULT_LEAD_LIMIT_24H = 3
+MAX_LEAD_LIMIT_24H = 20
+
+
+class LeadRateLimitError(ValueError):
+    """Raised when a Telegram user exceeds the rolling 24-hour inquiry limit."""
+
+
+def leads_max_per_user_24h() -> int:
+    """Return the validated rolling 24-hour inquiry limit per Telegram user."""
+    raw = os.getenv("LEADS_MAX_PER_USER_24H", "").strip()
+    if not raw:
+        raw = str(DEFAULT_LEAD_LIMIT_24H)
+    try:
+        limit = int(raw)
+    except ValueError as exc:
+        raise ValueError("LEADS_MAX_PER_USER_24H must be an integer") from exc
+    if not 1 <= limit <= MAX_LEAD_LIMIT_24H:
+        raise ValueError(
+            f"LEADS_MAX_PER_USER_24H must be between 1 and {MAX_LEAD_LIMIT_24H}"
+        )
+    return limit
 
 
 def leads_retention_days() -> int:
@@ -145,11 +167,15 @@ def save_lead(user, message: str) -> int:
         raise ValueError("Lead message must contain 10–2000 characters")
 
     retention_days = leads_retention_days()
+    per_user_limit = leads_max_per_user_24h()
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(days=retention_days)).isoformat()
+    rolling_24h_cutoff = (now - timedelta(hours=24)).isoformat()
     db_path = os.getenv("LEADS_DB_PATH", "aura_leads.sqlite3")
 
     with closing(sqlite3.connect(db_path)) as connection:
+        # Restrict the newly-created file before writing any customer data.
+        _restrict_database_permissions(db_path)
         with connection:
             connection.execute(
                 """
@@ -165,9 +191,26 @@ def save_lead(user, message: str) -> int:
                 """
             )
             connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_leads_user_created_at
+                ON leads (telegram_user_id, created_at)
+                """
+            )
+            connection.execute(
                 "DELETE FROM leads WHERE created_at < ?",
                 (cutoff,),
             )
+            recent_count = connection.execute(
+                """
+                SELECT COUNT(*) FROM leads
+                WHERE telegram_user_id = ? AND created_at >= ?
+                """,
+                (user_id, rolling_24h_cutoff),
+            ).fetchone()[0]
+            if recent_count >= per_user_limit:
+                raise LeadRateLimitError(
+                    "Rolling 24-hour inquiry limit reached"
+                )
             cursor = connection.execute(
                 """
                 INSERT INTO leads
@@ -310,7 +353,16 @@ async def lead_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return LEAD_DETAILS
 
-    lead_id = save_lead(update.effective_user, message)
+    try:
+        lead_id = save_lead(update.effective_user, message)
+    except LeadRateLimitError:
+        limit = leads_max_per_user_24h()
+        await update.effective_message.reply_text(
+            f"وصلت إلى الحد المسموح ({limit} طلبات خلال 24 ساعة). "
+            "يمكنك المحاولة بعد مرور 24 ساعة على طلبك الأقدم."
+        )
+        return ConversationHandler.END
+
     await update.effective_message.reply_text(
         f"وصل طلبك بنجاح. رقم الطلب: #{lead_id}. سنتواصل معك عبر Telegram إذا كانت بيانات التواصل متاحة."
     )
@@ -399,6 +451,7 @@ def main():
         )
 
     leads_retention_days()
+    leads_max_per_user_24h()
     configured_admin_chat_id()
     purged = purge_expired_leads()
     if purged:

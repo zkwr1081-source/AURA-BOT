@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock, patch
 import main as aura_main
 
 from main import (
+    LeadRateLimitError,
     delete_leads_for_user,
+    leads_max_per_user_24h,
     leads_retention_days,
     purge_expired_leads,
     save_lead,
@@ -89,6 +91,39 @@ class SaveLeadTests(unittest.TestCase):
                     ).fetchone()[0]
                 self.assertIsNone(expired)
                 self.assertEqual(total, 2)
+
+    def test_per_user_limit_rejects_excess_requests_in_rolling_24_hours(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "leads.sqlite3")
+            with patch.dict(
+                os.environ,
+                {
+                    "LEADS_DB_PATH": database,
+                    "LEADS_RETENTION_DAYS": "90",
+                    "LEADS_MAX_PER_USER_24H": "3",
+                },
+            ):
+                for _ in range(3):
+                    save_lead(self.user(), "أريد بوتاً لمتجري مع قائمة منتجات")
+                with self.assertRaises(LeadRateLimitError):
+                    save_lead(self.user(), "أريد بوتاً إضافياً لمتجري")
+
+                with closing(sqlite3.connect(database)) as connection:
+                    count = connection.execute(
+                        "SELECT COUNT(*) FROM leads WHERE telegram_user_id = ?",
+                        (12345,),
+                    ).fetchone()[0]
+                self.assertEqual(count, 3)
+
+    def test_per_user_limit_setting_has_safe_bounds(self):
+        for value in ("0", "21", "not-a-number"):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {"LEADS_MAX_PER_USER_24H": value}):
+                    with self.assertRaises(ValueError):
+                        leads_max_per_user_24h()
+
+        with patch.dict(os.environ, {"LEADS_MAX_PER_USER_24H": "3"}):
+            self.assertEqual(leads_max_per_user_24h(), 3)
 
     def test_startup_purge_removes_expired_rows(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -343,6 +378,27 @@ class LeadFlowTests(unittest.IsolatedAsyncioTestCase):
             with closing(sqlite3.connect(database)) as connection:
                 count = connection.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
             self.assertEqual(count, 1)
+
+    async def test_rate_limited_user_receives_clear_response_without_admin_notice(self):
+        message = SimpleNamespace(
+            text="أريد بوتاً لمتجري مع قائمة منتجات",
+            reply_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            effective_message=message,
+            effective_user=self.user(),
+        )
+        bot = SimpleNamespace(send_message=AsyncMock())
+        context = SimpleNamespace(bot=bot)
+
+        with patch.dict(os.environ, {"LEADS_MAX_PER_USER_24H": "3"}):
+            with patch("main.save_lead", side_effect=LeadRateLimitError()):
+                state = await aura_main.lead_details(update, context)
+
+        self.assertEqual(state, aura_main.ConversationHandler.END)
+        message.reply_text.assert_awaited_once()
+        self.assertIn("الحد المسموح", message.reply_text.await_args.args[0])
+        bot.send_message.assert_not_awaited()
 
     async def test_short_details_are_rejected_without_creating_database(self):
         with tempfile.TemporaryDirectory() as directory:

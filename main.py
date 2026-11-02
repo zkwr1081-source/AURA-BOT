@@ -46,6 +46,20 @@ def leads_retention_days() -> int:
     return days
 
 
+def configured_admin_chat_id() -> int | None:
+    """Return a validated optional Telegram admin chat ID."""
+    raw = os.getenv("ADMIN_CHAT_ID", "").strip()
+    if not raw:
+        return None
+    try:
+        chat_id = int(raw)
+    except ValueError as exc:
+        raise ValueError("ADMIN_CHAT_ID must be a numeric Telegram chat ID") from exc
+    if chat_id == 0:
+        raise ValueError("ADMIN_CHAT_ID must not be zero")
+    return chat_id
+
+
 def _restrict_database_permissions(db_path: str) -> None:
     """Restrict the local lead database to its owner on POSIX systems."""
     if os.name != "posix":
@@ -247,11 +261,13 @@ async def request_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     retention_days = leads_retention_days()
     consent_text = (
         "قبل إرسال طلبك: سنحفظ اسم حساب Telegram ومعرّفك واسم العرض ورسالتك "
-        f"للرد على استفسارك لمدة تصل إلى {retention_days} يوماً. "
+        f"للرد على استفسارك لمدة احتفاظ قدرها {retention_days} يوماً؛ "
+        "تُحذف السجلات المنتهية ضمن التنظيف الدوري كل 24 ساعة أو عند بدء البوت أو حفظ طلب جديد. "
         "يمكنك حذف سجلات طلباتك من قاعدة AURA باستخدام /forget. "
         "لا ترسل كلمات مرور أو رموز تحقق أو بيانات بطاقات أو أسرار دفع."
     )
-    if os.getenv("ADMIN_CHAT_ID", "").strip():
+    admin_chat_id = configured_admin_chat_id()
+    if admin_chat_id is not None:
         consent_text += (
             "\nإشعار الإدارة مفعّل: ستُرسل نسخة من تفاصيل الطلب إلى محادثة الإدارة. "
             "الأمر /forget لا يحذف نسخة الرسالة من سجل Telegram لدى الإدارة."
@@ -299,11 +315,11 @@ async def lead_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"وصل طلبك بنجاح. رقم الطلب: #{lead_id}. سنتواصل معك عبر Telegram إذا كانت بيانات التواصل متاحة."
     )
 
-    admin_chat_id = os.getenv("ADMIN_CHAT_ID", "").strip()
-    if admin_chat_id:
-        try:
+    try:
+        admin_chat_id = configured_admin_chat_id()
+        if admin_chat_id is not None:
             await context.bot.send_message(
-                chat_id=int(admin_chat_id),
+                chat_id=admin_chat_id,
                 text=(
                     f"طلب جديد #{lead_id}\n"
                     f"الاسم: {update.effective_user.full_name}\n"
@@ -312,8 +328,8 @@ async def lead_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"التفاصيل:\n{message}"
                 ),
             )
-        except (ValueError, Exception):
-            logger.exception("Could not notify admin about lead #%s", lead_id)
+    except Exception:
+        logger.exception("Could not notify admin about lead #%s", lead_id)
     return ConversationHandler.END
 
 
@@ -383,6 +399,7 @@ def main():
         )
 
     leads_retention_days()
+    configured_admin_chat_id()
     purged = purge_expired_leads()
     if purged:
         logger.info("Purged %s expired lead records at startup", purged)

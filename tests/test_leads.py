@@ -166,6 +166,21 @@ class SaveLeadTests(unittest.TestCase):
             any(isinstance(handler, aura_main.MessageHandler) for handler in details_handlers)
         )
 
+    def test_admin_chat_id_is_optional_and_numeric(self):
+        with patch.dict(os.environ, {"ADMIN_CHAT_ID": ""}):
+            self.assertIsNone(aura_main.configured_admin_chat_id())
+        with patch.dict(os.environ, {"ADMIN_CHAT_ID": "98765"}):
+            self.assertEqual(aura_main.configured_admin_chat_id(), 98765)
+        with patch.dict(os.environ, {"ADMIN_CHAT_ID": "-1001234567890"}):
+            self.assertEqual(aura_main.configured_admin_chat_id(), -1001234567890)
+
+    def test_invalid_admin_chat_id_fails_validation(self):
+        for value in ("not-a-number", "0"):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {"ADMIN_CHAT_ID": value}):
+                    with self.assertRaises(ValueError):
+                        aura_main.configured_admin_chat_id()
+
     def test_retention_setting_has_safe_bounds(self):
         for value in ("0", "3651", "not-a-number"):
             with self.subTest(value=value):
@@ -222,6 +237,7 @@ class SaveLeadTests(unittest.TestCase):
                 os.environ,
                 {
                     "TELEGRAM_BOT_TOKEN": "test-token-not-used-for-network",
+                    "ADMIN_CHAT_ID": "",
                     "LEADS_DB_PATH": database,
                     "LEADS_RETENTION_DAYS": "90",
                 },

@@ -1,7 +1,8 @@
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -23,38 +24,195 @@ logger = logging.getLogger("aura-bot")
 LEAD_DETAILS = 1
 
 
-def save_lead(user, message: str) -> int:
-    """Persist a consented sales inquiry without collecting payment credentials."""
+DEFAULT_LEADS_RETENTION_DAYS = 90
+MAX_LEADS_RETENTION_DAYS = 3650
+
+
+def leads_retention_days() -> int:
+    """Return a validated lead-retention period in days."""
+    raw = os.getenv("LEADS_RETENTION_DAYS", "").strip()
+    if not raw:
+        raw = str(DEFAULT_LEADS_RETENTION_DAYS)
+    try:
+        days = int(raw)
+    except ValueError as exc:
+        raise ValueError("LEADS_RETENTION_DAYS must be an integer") from exc
+    if not 1 <= days <= MAX_LEADS_RETENTION_DAYS:
+        raise ValueError(
+            f"LEADS_RETENTION_DAYS must be between 1 and {MAX_LEADS_RETENTION_DAYS}"
+        )
+    return days
+
+
+def _restrict_database_permissions(db_path: str) -> None:
+    """Restrict the local lead database to its owner on POSIX systems."""
+    if os.name != "posix":
+        return
+    try:
+        os.chmod(db_path, 0o600)
+    except OSError:
+        logger.warning("Unable to restrict permissions on the lead database file")
+
+
+def purge_expired_leads() -> int:
+    """Delete expired lead records without creating a database when none exists."""
     db_path = os.getenv("LEADS_DB_PATH", "aura_leads.sqlite3")
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS leads (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                telegram_user_id INTEGER NOT NULL,
-                username TEXT,
-                display_name TEXT,
-                message TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'new'
+    if not os.path.isfile(db_path):
+        return 0
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=leads_retention_days())
+    ).isoformat()
+    with closing(sqlite3.connect(db_path)) as connection:
+        with connection:
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='leads'"
+            ).fetchone()
+            if not table_exists:
+                return 0
+            cursor = connection.execute(
+                "DELETE FROM leads WHERE created_at < ?",
+                (cutoff,),
             )
-            """
+            deleted = max(cursor.rowcount, 0)
+
+    if deleted:
+        _restrict_database_permissions(db_path)
+    return deleted
+
+
+def delete_leads_for_user(telegram_user_id: int) -> int:
+    """Delete the current user's inquiry records from the local SQLite database."""
+    if (
+        not isinstance(telegram_user_id, int)
+        or isinstance(telegram_user_id, bool)
+        or telegram_user_id <= 0
+    ):
+        raise ValueError("telegram_user_id must be a positive integer")
+
+    db_path = os.getenv("LEADS_DB_PATH", "aura_leads.sqlite3")
+    if not os.path.isfile(db_path):
+        return 0
+
+    with closing(sqlite3.connect(db_path)) as connection:
+        with connection:
+            table_exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='leads'"
+            ).fetchone()
+            if not table_exists:
+                return 0
+            cursor = connection.execute(
+                "DELETE FROM leads WHERE telegram_user_id = ?",
+                (telegram_user_id,),
+            )
+            deleted = max(cursor.rowcount, 0)
+
+    if deleted:
+        _restrict_database_permissions(db_path)
+    return deleted
+
+
+def save_lead(user, message: str) -> int:
+    """Persist a consented inquiry and prune expired records in the same transaction."""
+    user_id = getattr(user, "id", None)
+    if (
+        not isinstance(user_id, int)
+        or isinstance(user_id, bool)
+        or user_id <= 0
+    ):
+        raise ValueError("A valid Telegram user is required")
+
+    if not isinstance(message, str):
+        raise ValueError("Lead message must be text")
+    message = message.strip()
+    if not 10 <= len(message) <= 2000:
+        raise ValueError("Lead message must contain 10–2000 characters")
+
+    retention_days = leads_retention_days()
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=retention_days)).isoformat()
+    db_path = os.getenv("LEADS_DB_PATH", "aura_leads.sqlite3")
+
+    with closing(sqlite3.connect(db_path)) as connection:
+        with connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS leads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id INTEGER NOT NULL,
+                    username TEXT,
+                    display_name TEXT,
+                    message TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'new'
+                )
+                """
+            )
+            connection.execute(
+                "DELETE FROM leads WHERE created_at < ?",
+                (cutoff,),
+            )
+            cursor = connection.execute(
+                """
+                INSERT INTO leads
+                    (telegram_user_id, username, display_name, message, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    getattr(user, "username", None),
+                    getattr(user, "full_name", None),
+                    message,
+                    now.isoformat(),
+                ),
+            )
+            lead_id = int(cursor.lastrowid)
+
+    _restrict_database_permissions(db_path)
+    return lead_id
+
+
+async def retention_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
+    """JobQueue callback for daily privacy-retention cleanup."""
+    try:
+        deleted = await context.application.run_in_thread(purge_expired_leads)
+        if deleted:
+            logger.info("Purged %s expired lead records", deleted)
+    except Exception:
+        logger.exception("Lead retention cleanup failed")
+
+
+async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Let a Telegram user remove their inquiry records from the local database."""
+    user = update.effective_user
+    message = update.effective_message
+    if user is None or message is None:
+        return ConversationHandler.END
+
+    deleted = delete_leads_for_user(user.id)
+    if deleted:
+        response = f"تم حذف {deleted} سجل طلب من قاعدة AURA المحلية."
+    else:
+        response = "لم نعثر على طلبات محفوظة لك في قاعدة AURA المحلية."
+
+    if os.getenv("ADMIN_CHAT_ID", "").strip():
+        response += (
+            "\nملاحظة: قد تبقى نسخة إشعار أُرسلت إلى محادثة الإدارة؛ "
+            "حذفها من سجل Telegram يتم داخل تلك المحادثة. "
+            "الأمر /forget يحذف سجلات قاعدة AURA فقط."
         )
-        cursor = connection.execute(
-            """
-            INSERT INTO leads
-                (telegram_user_id, username, display_name, message, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (
-                user.id,
-                user.username,
-                user.full_name,
-                message,
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-        return int(cursor.lastrowid)
+    await message.reply_text(response)
+    return ConversationHandler.END
+
+
+async def retention_cleanup_job(context: ContextTypes.DEFAULT_TYPE):
+    """JobQueue callback for daily privacy-retention cleanup."""
+    try:
+        deleted = await context.application.run_in_thread(purge_expired_leads)
+        if deleted:
+            logger.info("Purged %s expired lead records", deleted)
+    except Exception:
+        logger.exception("Lead retention cleanup failed")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,10 +251,21 @@ async def request_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("أوافق وأتابع", callback_data="lead_consent"),
         InlineKeyboardButton("إلغاء", callback_data="lead_cancel"),
     ]]
+    retention_days = leads_retention_days()
+    consent_text = (
+        "قبل إرسال طلبك: سنحفظ اسم حساب Telegram ومعرّفك واسم العرض ورسالتك "
+        f"للرد على استفسارك لمدة تصل إلى {retention_days} يوماً. "
+        "يمكنك حذف سجلات طلباتك من قاعدة AURA باستخدام /forget. "
+        "لا ترسل كلمات مرور أو رموز تحقق أو بيانات بطاقات أو أسرار دفع."
+    )
+    if os.getenv("ADMIN_CHAT_ID", "").strip():
+        consent_text += (
+            "\\nإشعار الإدارة مفعّل: ستُرسل نسخة من تفاصيل الطلب إلى محادثة الإدارة. "
+            "الأمر /forget لا يحذف نسخة الرسالة من سجل Telegram لدى الإدارة."
+        )
+    consent_text += "\\nيمكنك الإلغاء الآن."
     await update.effective_message.reply_text(
-        "قبل إرسال طلبك: سنحفظ اسم حساب Telegram ومعرّفك ورسالتك للرد على استفسارك. "
-        "لا ترسل كلمات مرور أو رموز تحقق أو بيانات بطاقات أو أسرار دفع. "
-        "يمكنك الإلغاء الآن.",
+        consent_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return LEAD_DETAILS
@@ -194,7 +363,23 @@ def main():
             "never put bot tokens in source code."
         )
 
+    retention_days = leads_retention_days()
+    purged = purge_expired_leads()
+    if purged:
+        logger.info("Purged %s expired lead records at startup", purged)
+
     application = ApplicationBuilder().token(token).build()
+    job_queue = application.job_queue
+    if job_queue is None:
+        raise RuntimeError(
+            "Lead retention requires python-telegram-bot[job-queue] to be installed."
+        )
+    job_queue.run_repeating(
+        retention_cleanup_job,
+        interval=24 * 60 * 60,
+        first=60,
+        name="aura-lead-retention",
+    )
     lead_conversation = ConversationHandler(
         entry_points=[
             CommandHandler("request", request_start),
@@ -207,12 +392,16 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, lead_details),
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("forget", forget),
+        ],
         per_user=True,
         per_chat=True,
     )
     application.add_handler(CommandHandler("start", start))
     application.add_handler(lead_conversation)
+    application.add_handler(CommandHandler("forget", forget))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_error_handler(error_handler)
     logger.info("AURA bot is starting")

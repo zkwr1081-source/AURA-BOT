@@ -1,27 +1,37 @@
 import os
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from main import save_lead
+from main import (
+    delete_leads_for_user,
+    leads_retention_days,
+    purge_expired_leads,
+    save_lead,
+)
 
 
 class SaveLeadTests(unittest.TestCase):
+    def user(self, user_id=12345, username="shop_owner", full_name="Shop Owner"):
+        return SimpleNamespace(id=user_id, username=username, full_name=full_name)
+
     def test_saves_lead_to_configured_sqlite_database(self):
         with tempfile.TemporaryDirectory() as directory:
             database = os.path.join(directory, "leads.sqlite3")
-            old_path = os.environ.get("LEADS_DB_PATH")
-            os.environ["LEADS_DB_PATH"] = database
-            try:
-                user = SimpleNamespace(
-                    id=12345,
-                    username="shop_owner",
-                    full_name="Shop Owner",
+            with patch.dict(
+                os.environ,
+                {"LEADS_DB_PATH": database, "LEADS_RETENTION_DAYS": "90"},
+            ):
+                lead_id = save_lead(
+                    self.user(),
+                    "أريد بوتاً لمتجري مع قائمة منتجات",
                 )
-                lead_id = save_lead(user, "أريد بوتاً لمتجري مع قائمة منتجات")
                 self.assertEqual(lead_id, 1)
-                import sqlite3
-                with sqlite3.connect(database) as connection:
+                with closing(sqlite3.connect(database)) as connection:
                     row = connection.execute(
                         "SELECT telegram_user_id, username, display_name, message, status "
                         "FROM leads WHERE id = ?",
@@ -37,11 +47,116 @@ class SaveLeadTests(unittest.TestCase):
                         "new",
                     ),
                 )
-            finally:
-                if old_path is None:
-                    os.environ.pop("LEADS_DB_PATH", None)
-                else:
-                    os.environ["LEADS_DB_PATH"] = old_path
+                if os.name == "posix":
+                    self.assertEqual(os.stat(database).st_mode & 0o777, 0o600)
+
+    def test_save_prunes_expired_records_before_inserting_new_lead(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "leads.sqlite3")
+            with patch.dict(
+                os.environ,
+                {"LEADS_DB_PATH": database, "LEADS_RETENTION_DAYS": "30"},
+            ):
+                save_lead(self.user(), "أريد بوتاً لمتجري مع قائمة منتجات")
+                old_created_at = (
+                    datetime.now(timezone.utc) - timedelta(days=31)
+                ).isoformat()
+                with closing(sqlite3.connect(database)) as connection:
+                    with connection:
+                        cursor = connection.execute(
+                            """
+                            INSERT INTO leads
+                                (telegram_user_id, username, display_name, message, created_at)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (99999, "expired_user", "Expired", "old inquiry", old_created_at),
+                        )
+                        expired_id = cursor.lastrowid
+
+                save_lead(
+                    self.user(67890, "new_shop", "New Shop"),
+                    "أحتاج بوتاً لعرض خدمات متجري",
+                )
+                with closing(sqlite3.connect(database)) as connection:
+                    expired = connection.execute(
+                        "SELECT 1 FROM leads WHERE id = ?", (expired_id,)
+                    ).fetchone()
+                    total = connection.execute(
+                        "SELECT COUNT(*) FROM leads"
+                    ).fetchone()[0]
+                self.assertIsNone(expired)
+                self.assertEqual(total, 2)
+
+    def test_startup_purge_removes_expired_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "leads.sqlite3")
+            with patch.dict(
+                os.environ,
+                {"LEADS_DB_PATH": database, "LEADS_RETENTION_DAYS": "30"},
+            ):
+                save_lead(self.user(), "أريد بوتاً لمتجري مع قائمة منتجات")
+                old_created_at = (
+                    datetime.now(timezone.utc) - timedelta(days=31)
+                ).isoformat()
+                with closing(sqlite3.connect(database)) as connection:
+                    with connection:
+                        connection.execute(
+                            """
+                            INSERT INTO leads
+                                (telegram_user_id, username, display_name, message, created_at)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (99999, "expired_user", "Expired", "old inquiry", old_created_at),
+                        )
+                self.assertEqual(purge_expired_leads(), 1)
+                with closing(sqlite3.connect(database)) as connection:
+                    count = connection.execute(
+                        "SELECT COUNT(*) FROM leads"
+                    ).fetchone()[0]
+                self.assertEqual(count, 1)
+
+    def test_forget_deletes_only_the_requesting_users_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "leads.sqlite3")
+            with patch.dict(
+                os.environ,
+                {"LEADS_DB_PATH": database, "LEADS_RETENTION_DAYS": "90"},
+            ):
+                save_lead(self.user(), "أريد بوتاً لمتجري مع قائمة منتجات")
+                save_lead(self.user(), "أريد إضافة أزرار لطلب الخدمة")
+                save_lead(
+                    self.user(67890, "other_shop", "Other Shop"),
+                    "أحتاج بوتاً آخر لنشاطي التجاري",
+                )
+
+                self.assertEqual(delete_leads_for_user(12345), 2)
+                self.assertEqual(delete_leads_for_user(12345), 0)
+                with closing(sqlite3.connect(database)) as connection:
+                    remaining = connection.execute(
+                        "SELECT telegram_user_id FROM leads"
+                    ).fetchall()
+                self.assertEqual(remaining, [(67890,)])
+
+    def test_purge_and_forget_do_not_create_missing_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "missing.sqlite3")
+            with patch.dict(
+                os.environ,
+                {"LEADS_DB_PATH": database, "LEADS_RETENTION_DAYS": "90"},
+            ):
+                self.assertEqual(purge_expired_leads(), 0)
+                self.assertEqual(delete_leads_for_user(12345), 0)
+                self.assertFalse(os.path.exists(database))
+
+    def test_retention_setting_has_safe_bounds(self):
+        for value in ("0", "3651", "not-a-number"):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {"LEADS_RETENTION_DAYS": value}):
+                    with self.assertRaises(ValueError):
+                        leads_retention_days()
+
+        with patch.dict(os.environ, {"LEADS_RETENTION_DAYS": "90"}):
+            self.assertEqual(leads_retention_days(), 90)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("aura-bot")
 
+LEAD_CONSENT = 0
 LEAD_DETAILS = 1
 
 
@@ -260,7 +261,7 @@ async def request_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         consent_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-    return LEAD_DETAILS
+    return LEAD_CONSENT
 
 
 async def lead_consent(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -347,6 +348,32 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled bot error", exc_info=context.error)
 
 
+def build_lead_conversation() -> ConversationHandler:
+    """Build the lead state machine; text collection is reachable only after consent."""
+    return ConversationHandler(
+        entry_points=[
+            CommandHandler("request", request_start),
+            CallbackQueryHandler(request_start, pattern="^lead_start$"),
+        ],
+        states={
+            LEAD_CONSENT: [
+                CallbackQueryHandler(lead_consent, pattern="^lead_consent$"),
+                CallbackQueryHandler(lead_cancel, pattern="^lead_cancel$"),
+            ],
+            LEAD_DETAILS: [
+                CallbackQueryHandler(lead_cancel, pattern="^lead_cancel$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, lead_details),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CommandHandler("forget", forget),
+        ],
+        per_user=True,
+        per_chat=True,
+    )
+
+
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -372,25 +399,7 @@ def main():
         first=60,
         name="aura-lead-retention",
     )
-    lead_conversation = ConversationHandler(
-        entry_points=[
-            CommandHandler("request", request_start),
-            CallbackQueryHandler(request_start, pattern="^lead_start$"),
-        ],
-        states={
-            LEAD_DETAILS: [
-                CallbackQueryHandler(lead_consent, pattern="^lead_consent$"),
-                CallbackQueryHandler(lead_cancel, pattern="^lead_cancel$"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, lead_details),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            CommandHandler("forget", forget),
-        ],
-        per_user=True,
-        per_chat=True,
-    )
+    lead_conversation = build_lead_conversation()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(lead_conversation)
     application.add_handler(CommandHandler("forget", forget))

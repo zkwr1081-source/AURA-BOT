@@ -151,6 +151,21 @@ class SaveLeadTests(unittest.TestCase):
                 self.assertEqual(delete_leads_for_user(12345), 0)
                 self.assertFalse(os.path.exists(database))
 
+    def test_conversation_state_does_not_accept_text_before_consent(self):
+        conversation = aura_main.build_lead_conversation()
+        consent_handlers = conversation.states[aura_main.LEAD_CONSENT]
+        details_handlers = conversation.states[aura_main.LEAD_DETAILS]
+
+        self.assertFalse(
+            any(isinstance(handler, aura_main.MessageHandler) for handler in consent_handlers)
+        )
+        self.assertTrue(
+            any(isinstance(handler, aura_main.CallbackQueryHandler) for handler in consent_handlers)
+        )
+        self.assertTrue(
+            any(isinstance(handler, aura_main.MessageHandler) for handler in details_handlers)
+        )
+
     def test_retention_setting_has_safe_bounds(self):
         for value in ("0", "3651", "not-a-number"):
             with self.subTest(value=value):
@@ -227,6 +242,109 @@ class SaveLeadTests(unittest.TestCase):
         with patch("main.purge_expired_leads", return_value=2) as purge_mock:
             asyncio.run(aura_main.retention_cleanup_job(context))
         purge_mock.assert_called_once()
+
+class LeadFlowTests(unittest.IsolatedAsyncioTestCase):
+    def user(self, user_id=12345, username="shop_owner", full_name="Shop Owner"):
+        return SimpleNamespace(id=user_id, username=username, full_name=full_name)
+
+    async def test_request_start_discloses_retention_and_returns_consent_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "leads.sqlite3")
+            message = SimpleNamespace(reply_text=AsyncMock())
+            update = SimpleNamespace(effective_message=message)
+            with patch.dict(
+                os.environ,
+                {
+                    "LEADS_DB_PATH": database,
+                    "LEADS_RETENTION_DAYS": "30",
+                    "ADMIN_CHAT_ID": "98765",
+                },
+            ):
+                state = await aura_main.request_start(update, SimpleNamespace())
+
+            self.assertEqual(state, aura_main.LEAD_CONSENT)
+            consent_text = message.reply_text.await_args.args[0]
+            self.assertIn("30 يوماً", consent_text)
+            self.assertIn("/forget", consent_text)
+            self.assertIn("إشعار الإدارة مفعّل", consent_text)
+            callback_data = {
+                button.callback_data
+                for row in message.reply_text.await_args.kwargs["reply_markup"].inline_keyboard
+                for button in row
+            }
+            self.assertEqual(callback_data, {"lead_consent", "lead_cancel"})
+            self.assertFalse(os.path.exists(database))
+
+    async def test_consent_callback_moves_to_details_without_saving(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "leads.sqlite3")
+            query = SimpleNamespace(answer=AsyncMock(), edit_message_text=AsyncMock())
+            update = SimpleNamespace(callback_query=query)
+            with patch.dict(
+                os.environ,
+                {"LEADS_DB_PATH": database, "LEADS_RETENTION_DAYS": "90"},
+            ):
+                state = await aura_main.lead_consent(update, SimpleNamespace())
+
+            self.assertEqual(state, aura_main.LEAD_DETAILS)
+            query.answer.assert_awaited_once()
+            prompt = query.edit_message_text.await_args.args[0]
+            self.assertIn("اكتب طلبك", prompt)
+            self.assertIn("لا تضع", prompt)
+            self.assertFalse(os.path.exists(database))
+
+    async def test_valid_details_save_and_notify_configured_admin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "leads.sqlite3")
+            message = SimpleNamespace(
+                text="أريد بوتاً لمتجري مع قائمة منتجات",
+                reply_text=AsyncMock(),
+            )
+            update = SimpleNamespace(
+                effective_message=message,
+                effective_user=self.user(),
+            )
+            bot = SimpleNamespace(send_message=AsyncMock())
+            context = SimpleNamespace(bot=bot)
+            with patch.dict(
+                os.environ,
+                {
+                    "LEADS_DB_PATH": database,
+                    "LEADS_RETENTION_DAYS": "90",
+                    "ADMIN_CHAT_ID": "98765",
+                },
+            ):
+                state = await aura_main.lead_details(update, context)
+
+            self.assertEqual(state, aura_main.ConversationHandler.END)
+            message.reply_text.assert_awaited_once()
+            self.assertIn("#1", message.reply_text.await_args.args[0])
+            bot.send_message.assert_awaited_once()
+            kwargs = bot.send_message.await_args.kwargs
+            self.assertEqual(kwargs["chat_id"], 98765)
+            self.assertIn("Telegram ID: 12345", kwargs["text"])
+            self.assertIn(message.text, kwargs["text"])
+            with closing(sqlite3.connect(database)) as connection:
+                count = connection.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+            self.assertEqual(count, 1)
+
+    async def test_short_details_are_rejected_without_creating_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = os.path.join(directory, "leads.sqlite3")
+            message = SimpleNamespace(text="short", reply_text=AsyncMock())
+            update = SimpleNamespace(
+                effective_message=message,
+                effective_user=self.user(),
+            )
+            with patch.dict(
+                os.environ,
+                {"LEADS_DB_PATH": database, "LEADS_RETENTION_DAYS": "90"},
+            ):
+                state = await aura_main.lead_details(update, SimpleNamespace())
+
+            self.assertEqual(state, aura_main.LEAD_DETAILS)
+            self.assertIn("10 أحرف", message.reply_text.await_args.args[0])
+            self.assertFalse(os.path.exists(database))
 
 if __name__ == "__main__":
     unittest.main()

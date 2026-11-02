@@ -176,6 +176,17 @@ class Store:
                 ).fetchall()
                 return [dict(row) for row in rows]
 
+    def cancel_order(self, order_id, telegram_user_id):
+        """Cancel a pending order only when requested by its owner."""
+        with closing(self._connect()) as db:
+            with db:
+                cursor = db.execute(
+                    """UPDATE orders SET status = 'cancelled'
+                       WHERE id = ? AND telegram_user_id = ? AND status = 'new'""",
+                    (int(order_id), int(telegram_user_id)),
+                )
+                return cursor.rowcount == 1
+
     def update_order_status(self, order_id, status):
         if status not in ORDER_STATUSES:
             raise ValueError("حالة الطلب غير صالحة.")

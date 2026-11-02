@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 from telegram import (
     InlineKeyboardButton,
@@ -35,6 +36,44 @@ def get_store(context):
 
 def is_admin(update, context):
     return update.effective_user and update.effective_user.id in context.application.bot_data["admin_ids"]
+
+
+def normalize_currency(value):
+    code = str(value or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{3}", code):
+        raise ValueError("AURA_CURRENCY must be a 3-letter currency code.")
+    return code
+
+
+def chunk_lines(lines, max_chars=1800):
+    """Split plain-text admin output conservatively below Telegram's limit."""
+    if max_chars < 1:
+        raise ValueError("max_chars must be positive")
+
+    chunks = []
+    current = []
+    current_length = 0
+
+    for raw_line in lines:
+        line = str(raw_line)
+        parts = [line[i:i + max_chars] for i in range(0, len(line), max_chars)] or [""]
+        for part in parts:
+            extra = len(part) + (1 if current else 0)
+            if current and current_length + extra > max_chars:
+                chunks.append("\\n".join(current))
+                current = []
+                current_length = 0
+            current.append(part)
+            current_length += len(part) + (1 if len(current) > 1 else 0)
+
+    if current:
+        chunks.append("\\n".join(current))
+    return chunks
+
+
+async def reply_lines(message, lines):
+    for chunk in chunk_lines(lines):
+        await message.reply_text(chunk)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -116,6 +155,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("order:"):
+        pending_order_id = context.user_data.get("pending_order_id")
+        if pending_order_id:
+            await query.message.reply_text(
+                f"لديك طلب قيد استكمال التواصل #{pending_order_id}. "
+                "أرسل وسيلة التواصل أو استخدم /cancel لإلغاء الطلب."
+            )
+            return
         try:
             product_id = int(data.split(":", 1)[1])
             user = query.from_user
@@ -150,8 +196,17 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if contact.user_id and contact.user_id != update.effective_user.id:
         await update.effective_message.reply_text("يرجى مشاركة رقم هاتفك أنت.")
         return
-    saved = get_store(context).attach_contact(order_id, update.effective_user.id, contact.phone_number)
+    saved = get_store(context).attach_contact(
+        order_id, update.effective_user.id, contact.phone_number
+    )
     context.user_data.pop("pending_order_id", None)
+    if not saved:
+        await update.effective_message.reply_text(
+            f"لم يتم حفظ وسيلة التواصل للطلب #{order_id}؛ "
+            "لم يعد الطلب بانتظارها. استخدم /shop لبدء طلب جديد.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
     await update.effective_message.reply_text(
         f"وصلت بيانات التواصل للطلب #{order_id}. ستتواصل معك الإدارة لتأكيد التفاصيل.",
         reply_markup=ReplyKeyboardRemove(),
@@ -163,11 +218,22 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not order_id:
         return
     contact = (update.effective_message.text or "").strip()
-    if len(contact) < 3:
-        await update.effective_message.reply_text("أرسل رقم هاتف أو وسيلة تواصل واضحة.")
+    if not 3 <= len(contact) <= 200:
+        await update.effective_message.reply_text(
+            "أرسل وسيلة تواصل من 3 إلى 200 حرف."
+        )
         return
-    get_store(context).attach_contact(order_id, update.effective_user.id, contact)
+    saved = get_store(context).attach_contact(
+        order_id, update.effective_user.id, contact
+    )
     context.user_data.pop("pending_order_id", None)
+    if not saved:
+        await update.effective_message.reply_text(
+            f"لم يتم حفظ وسيلة التواصل للطلب #{order_id}؛ "
+            "لم يعد الطلب بانتظارها. استخدم /shop لبدء طلب جديد.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
     await update.effective_message.reply_text(
         f"تم حفظ وسيلة التواصل للطلب #{order_id}. ستتواصل معك الإدارة للتأكيد.",
         reply_markup=ReplyKeyboardRemove(),
@@ -175,9 +241,25 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop("pending_order_id", None)
+    order_id = context.user_data.pop("pending_order_id", None)
+    cancelled = False
+    if order_id:
+        cancelled = get_store(context).cancel_order(
+            order_id, update.effective_user.id
+        )
+
+    if order_id and cancelled:
+        response = f"تم إلغاء الطلب #{order_id}؛ لم يتم تحصيل أي مبلغ."
+    elif order_id:
+        response = (
+            f"تم إلغاء إدخال التواصل للطلب #{order_id}، "
+            "لكن لم تتغير حالة الطلب لأنه لم يعد بانتظار التواصل."
+        )
+    else:
+        response = "تم إلغاء إدخال بيانات الطلب."
+
     await update.effective_message.reply_text(
-        "تم إلغاء إدخال بيانات الطلب.",
+        response,
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -214,7 +296,7 @@ async def admin_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"({'نشط' if p['active'] else 'متوقف'})"
         for p in products
     ]
-    await update.effective_message.reply_text("\n".join(lines))
+    await reply_lines(update.effective_message, lines)
 
 
 async def admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -230,7 +312,7 @@ async def admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"| {o['status']} | {o['customer_name']} | {o['contact'] or 'بانتظار التواصل'}"
         for o in orders
     ]
-    await update.effective_message.reply_text("\n".join(lines))
+    await reply_lines(update.effective_message, lines)
 
 
 async def set_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -257,7 +339,9 @@ async def set_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.error("Unhandled bot error", exc_info=context.error)
+    error_type = type(context.error).__name__ if context.error else "Unknown"
+    # Avoid logging exception messages: Telegram HTTP errors can contain URLs or user data.
+    logger.error("Unhandled bot error (%s); details omitted for privacy.", error_type)
 
 
 def main():
@@ -274,7 +358,7 @@ def main():
         if value.strip().isdigit()
     }
     database_path = os.getenv("AURA_DATABASE_PATH", "aura_store.db")
-    currency = os.getenv("AURA_CURRENCY", "USD").strip().upper()[:8] or "USD"
+    currency = normalize_currency(os.getenv("AURA_CURRENCY", "USD"))
 
     application = ApplicationBuilder().token(token).build()
     application.bot_data["store"] = Store(database_path)

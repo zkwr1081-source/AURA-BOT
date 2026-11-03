@@ -66,7 +66,7 @@ class CommerceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("pending_order_id", context.user_data)
         response = message.reply_text.await_args.args[0]
         self.assertIn("لم يتم حفظ", response)
-        self.assertNotIn("تم حفظ", response)
+        self.assertNotIn("ستتواصل معك الإدارة للتأكيد", response)
 
     async def test_error_handler_omits_exception_details(self):
         error = RuntimeError("sensitive-token and customer phone data")

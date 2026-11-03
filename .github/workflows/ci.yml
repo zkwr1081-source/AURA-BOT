@@ -1,4 +1,4 @@
-name: AURA Bot CI
+name: AURA Commerce CI
 
 on:
   push:
@@ -23,3 +23,12 @@ jobs:
           pip install -r requirements.txt
       - name: Compile Python
         run: python -m compileall -q .
+      - name: Run store tests
+        run: python -m unittest discover -s tests -v
+      - name: Verify startup rejects missing token
+        run: |
+          if python main.py 2>startup-error.log; then
+            echo "Bot unexpectedly started without a token"
+            exit 1
+          fi
+          grep -q "TELEGRAM_BOT_TOKEN is missing" startup-error.log

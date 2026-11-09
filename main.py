@@ -9,6 +9,8 @@ from telegram.ext import (
     ContextTypes,
 )
 
+from service_leads import build_service_inquiry_handler, service_inquiry_keyboard
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -27,7 +29,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🎨 Code & Design — البرمجة والتصميم\n"
         "📊 Analytics — تحليل البيانات\n"
         "⚡ Automation — أتمتة المهام\n\n"
-        "اختر قسماً للمتابعة:"
+        "اختر قسماً أو اطلب خدمة:"
     )
     keyboard = [
         [InlineKeyboardButton("🏢 Enterprise", callback_data="serv_enterprise"),
@@ -36,6 +38,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🎨 Code & Design", callback_data="serv_code")],
         [InlineKeyboardButton("📊 Analytics", callback_data="serv_analytics"),
          InlineKeyboardButton("⚡ Automation", callback_data="serv_automation")],
+        [InlineKeyboardButton("🛠️ طلب خدمة", callback_data="service_catalog")],
         [InlineKeyboardButton("💳 الاشتراكات", callback_data="pay_sub")],
     ]
     await update.effective_message.reply_text(
@@ -56,7 +59,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "serv_analytics": "📊 قسم Analytics\nتحليل البيانات والتقارير.",
         "serv_automation": "⚡ قسم Automation\nأتمتة المهام المتكررة.",
     }
-    if query.data == "pay_sub":
+    if query.data == "service_catalog":
+        await query.message.reply_text(
+            "اختر الخدمة التي تريد طلبها. سنجمع معلومات الطلب ونحفظه للإدارة:",
+            reply_markup=service_inquiry_keyboard(),
+        )
+    elif query.data == "pay_sub":
         await query.message.reply_text(
             "💳 الدفع غير مفعّل بعد. لن نعرض روابط دفع تجريبية أو غير موثوقة. "
             "يرجى التواصل مع إدارة البوت لتفعيل وسيلة دفع رسمية."
@@ -79,6 +87,7 @@ def main():
 
     application = ApplicationBuilder().token(token).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(build_service_inquiry_handler())
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_error_handler(error_handler)
     logger.info("AURA bot is starting")

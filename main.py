@@ -24,15 +24,15 @@ logging.basicConfig(
 logger = logging.getLogger("aura-bot")
 
 WELCOME_TEXT = (
-    "🌟 *مرحباً بك في AURA* 🌟\\n\\n"
-    "🤖 مساعدك لإدارة الخدمات والمهام.\\n\\n"
-    "📌 *الأقسام المتاحة:*\\n"
-    "🏢 Enterprise — حلول الأعمال\\n"
-    "🤖 Multi-Agent — تنسيق الوكلاء\\n"
-    "💬 Chat — خدمات المحادثة\\n"
-    "🎨 Code & Design — البرمجة والتصميم\\n"
-    "📊 Analytics — تحليل البيانات\\n"
-    "⚡ Automation — أتمتة المهام\\n\\n"
+    "🌟 *مرحباً بك في AURA* 🌟\n\n"
+    "🤖 مساعدك لإدارة الخدمات والمهام.\n\n"
+    "📌 *الأقسام المتاحة:*\n"
+    "🏢 Enterprise — حلول الأعمال\n"
+    "🤖 Multi-Agent — تنسيق الوكلاء\n"
+    "💬 Chat — خدمات المحادثة\n"
+    "🎨 Code & Design — البرمجة والتصميم\n"
+    "📊 Analytics — تحليل البيانات\n"
+    "⚡ Automation — أتمتة المهام\n\n"
     "اختر قسماً للمتابعة:"
 )
 
@@ -64,7 +64,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.effective_message is None:
         return
     await update.effective_message.reply_text(
-        "حالة AURA: البوت متصل بمعالج Telegram عند تنفيذ هذا الأمر.\\n"
+        "حالة AURA: البوت متصل بمعالج Telegram عند تنفيذ هذا الأمر.\n"
         "الأقسام: 6 | الدفع: غير مفعّل | لا توجد معاملات مالية مفعّلة."
     )
 
@@ -117,3 +117,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+[executed on device: localhost (cbcd1892-30b4-4d96-8398-6c3486f41f3e)]

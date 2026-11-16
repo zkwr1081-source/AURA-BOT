@@ -117,5 +117,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-[executed on device: localhost (cbcd1892-30b4-4d96-8398-6c3486f41f3e)]

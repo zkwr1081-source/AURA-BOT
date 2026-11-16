@@ -1,13 +1,13 @@
-""""Pure application data and validation for the AURA Telegram bot."""
+"""Pure application data and validation for the AURA Telegram bot."""
 from __future__ import annotations
 
 SECTIONS: dict[str, str] = {
-    "serv_enterprise": "🏢 قسم Enterprise\\nحلول إدارة الأعمال والمشاريع.",
-    "serv_multi": "🤖 قسم Multi-Agent\\nتنسيق الوكلاء وتوزيع المهام.",
-    "serv_chat": "💬 قسم Chat\\nتكاملات المحادثة وخدمة العملاء.",
-    "serv_code": "🎨 قسم Code & Design\\nأدوات البرمجة والتصميم.",
-    "serv_analytics": "📊 قسم Analytics\\nتحليل البيانات والتقارير.",
-    "serv_automation": "⚡ قسم Automation\\nأتمتة المهام المتكررة.",
+    "serv_enterprise": "🏢 قسم Enterprise\nحلول إدارة الأعمال والمشاريع.",
+    "serv_multi": "🤖 قسم Multi-Agent\nتنسيق الوكلاء وتوزيع المهام.",
+    "serv_chat": "💬 قسم Chat\nتكاملات المحادثة وخدمة العملاء.",
+    "serv_code": "🎨 قسم Code & Design\nأدوات البرمجة والتصميم.",
+    "serv_analytics": "📊 قسم Analytics\nتحليل البيانات والتقارير.",
+    "serv_automation": "⚡ قسم Automation\nأتمتة المهام المتكررة.",
 }
 
 MENU_ROWS: tuple[tuple[tuple[str, str], ...], ...] = (

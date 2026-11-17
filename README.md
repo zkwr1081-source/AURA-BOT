@@ -49,6 +49,7 @@ python -m unittest discover -s tests -v
 
 للتواصل المباشر:
 
+- WhatsApp: [0964982098](https://wa.me/963964982098)
 - GitHub: https://github.com/zkwr1081-source
 - البريد الإلكتروني: zkwr1081@gmail.com
 
